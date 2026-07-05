@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import fikradoLogo from "@/assets/fikrado.png.asset.json";
 
 export const Route = createFileRoute("/")({
@@ -26,6 +26,16 @@ type WeatherData = {
   daily: { date: string; max: number; min: number; code: number }[];
 };
 
+type CityPreset = { key: string; name: string; country: string; flag: string; lat: number; lon: number };
+
+const CITIES: CityPreset[] = [
+  { key: "nairobi", name: "Nairobi", country: "Kenya", flag: "🇰🇪", lat: -1.2921, lon: 36.8219 },
+  { key: "addis", name: "Addis Ababa", country: "Ethiopia", flag: "🇪🇹", lat: 9.0300, lon: 38.7400 },
+  { key: "jijiga", name: "Jijiga", country: "Ethiopia", flag: "🇪🇹", lat: 9.3500, lon: 42.8000 },
+  { key: "hargeisa", name: "Hargeisa", country: "Somaliland", flag: "🇸🇴", lat: 9.5600, lon: 44.0650 },
+  { key: "mogadishu", name: "Mogadishu", country: "Somalia", flag: "🇸🇴", lat: 2.0469, lon: 45.3182 },
+];
+
 const codeInfo = (code: number, isDay = 1): { label: string; icon: string; grad: string } => {
   if (code === 0) return isDay
     ? { label: "Clear Sky", icon: "☀️", grad: "from-amber-400 via-orange-500 to-pink-500" }
@@ -44,54 +54,77 @@ function Index() {
   const [data, setData] = useState<WeatherData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<string>("geo");
 
-  useEffect(() => {
-    if (!("geolocation" in navigator)) {
-      setError("Geolocation not supported by your browser.");
+  const loadFor = useCallback(async (lat: number, lon: number, cityName?: string, countryName?: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const wRes = await fetch(
+        `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=5`,
+      );
+      const w = await wRes.json();
+      let city = cityName ?? "";
+      let country = countryName ?? "";
+      if (!city) {
+        const gRes = await fetch(
+          `https://geocoding-api.open-meteo.com/v1/reverse?latitude=${lat}&longitude=${lon}&count=1&language=en&format=json`,
+        );
+        const g = await gRes.json().catch(() => ({}));
+        const place = g?.results?.[0] ?? {};
+        city = place.name ?? "Your Location";
+        country = place.country ?? "";
+      }
+      setData({
+        temperature: w.current.temperature_2m,
+        apparent: w.current.apparent_temperature,
+        humidity: w.current.relative_humidity_2m,
+        wind: w.current.wind_speed_10m,
+        code: w.current.weather_code,
+        isDay: w.current.is_day,
+        city,
+        country,
+        daily: w.daily.time.map((t: string, i: number) => ({
+          date: t,
+          max: w.daily.temperature_2m_max[i],
+          min: w.daily.temperature_2m_min[i],
+          code: w.daily.weather_code[i],
+        })),
+      });
+    } catch {
+      setError("Failed to load weather data.");
+    } finally {
       setLoading(false);
+    }
+  }, []);
+
+  const loadGeo = useCallback(() => {
+    setSelected("geo");
+    if (!("geolocation" in navigator)) {
+      // fallback to Nairobi
+      const c = CITIES[0];
+      loadFor(c.lat, c.lon, c.name, c.country);
       return;
     }
+    setLoading(true);
     navigator.geolocation.getCurrentPosition(
-      async ({ coords }) => {
-        try {
-          const { latitude, longitude } = coords;
-          const wRes = await fetch(
-            `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=5`,
-          );
-          const w = await wRes.json();
-          const gRes = await fetch(
-            `https://geocoding-api.open-meteo.com/v1/reverse?latitude=${latitude}&longitude=${longitude}&count=1&language=en&format=json`,
-          );
-          const g = await gRes.json().catch(() => ({}));
-          const place = g?.results?.[0] ?? {};
-          setData({
-            temperature: w.current.temperature_2m,
-            apparent: w.current.apparent_temperature,
-            humidity: w.current.relative_humidity_2m,
-            wind: w.current.wind_speed_10m,
-            code: w.current.weather_code,
-            isDay: w.current.is_day,
-            city: place.name ?? "Your Location",
-            country: place.country ?? "",
-            daily: w.daily.time.map((t: string, i: number) => ({
-              date: t,
-              max: w.daily.temperature_2m_max[i],
-              min: w.daily.temperature_2m_min[i],
-              code: w.daily.weather_code[i],
-            })),
-          });
-        } catch {
-          setError("Failed to load weather data.");
-        } finally {
-          setLoading(false);
-        }
-      },
+      ({ coords }) => loadFor(coords.latitude, coords.longitude),
       () => {
-        setError("Location permission denied. Please enable it and refresh.");
-        setLoading(false);
+        const c = CITIES[0];
+        setError(null);
+        loadFor(c.lat, c.lon, c.name, c.country);
       },
     );
-  }, []);
+  }, [loadFor]);
+
+  useEffect(() => {
+    loadGeo();
+  }, [loadGeo]);
+
+  const selectCity = (c: CityPreset) => {
+    setSelected(c.key);
+    loadFor(c.lat, c.lon, c.name, c.country);
+  };
 
   const info = data ? codeInfo(data.code, data.isDay) : null;
 
@@ -106,15 +139,42 @@ function Index() {
         <h1 className="text-2xl font-black tracking-tight bg-gradient-to-r from-amber-400 via-yellow-300 to-amber-500 bg-clip-text text-transparent">
           FIKRADO WEATHER
         </h1>
-        <span className="text-xs text-white/50 uppercase tracking-widest">Live · Geo</span>
+        <span className="text-xs text-white/50 uppercase tracking-widest">East Africa · Live</span>
       </header>
 
       <main className="relative z-10 flex-1 px-4 sm:px-8 pb-8 flex items-center justify-center">
         <div className="w-full max-w-5xl">
+          {/* City selector */}
+          <div className="mb-6 flex flex-wrap gap-2 justify-center">
+            <button
+              onClick={loadGeo}
+              className={`px-4 py-2 rounded-full text-sm font-semibold border transition ${
+                selected === "geo"
+                  ? "bg-gradient-to-r from-amber-400 to-yellow-500 text-black border-amber-300 shadow-lg shadow-amber-500/30"
+                  : "bg-white/5 border-white/10 text-white/80 hover:bg-white/10"
+              }`}
+            >
+              📍 My Location
+            </button>
+            {CITIES.map((c) => (
+              <button
+                key={c.key}
+                onClick={() => selectCity(c)}
+                className={`px-4 py-2 rounded-full text-sm font-semibold border transition ${
+                  selected === c.key
+                    ? "bg-gradient-to-r from-amber-400 to-yellow-500 text-black border-amber-300 shadow-lg shadow-amber-500/30"
+                    : "bg-white/5 border-white/10 text-white/80 hover:bg-white/10"
+                }`}
+              >
+                {c.flag} {c.name}
+              </button>
+            ))}
+          </div>
+
           {loading && (
-            <div className="text-center py-32">
+            <div className="text-center py-24">
               <div className="inline-block h-16 w-16 rounded-full border-4 border-amber-400/30 border-t-amber-400 animate-spin" />
-              <p className="mt-6 text-white/70">Detecting your location…</p>
+              <p className="mt-6 text-white/70">Loading weather…</p>
             </div>
           )}
 
